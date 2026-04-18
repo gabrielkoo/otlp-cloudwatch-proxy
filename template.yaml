@@ -34,6 +34,22 @@ Parameters:
     Default: otlp-logs
     Description: CloudWatch Logs log group name for OTLP log ingestion.
 
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+    Description: Log retention in days for the OTLP log group.
+
+  ThrottleRateLimit:
+    Type: Number
+    Default: 100
+    Description: API Gateway throttle rate limit (requests per second).
+
+  ThrottleBurstLimit:
+    Type: Number
+    Default: 200
+    Description: API Gateway throttle burst limit.
+
   MetricNamespaces:
     Type: CommaDelimitedList
     Default: "OTLPMetrics,claude-code,copilot-cli,gemini-cli,cursor"
@@ -91,7 +107,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Ref OtlpLogGroupName
-      RetentionInDays: 30
+      RetentionInDays: !Ref LogRetentionDays
 
   # ── API Gateway REST API ────────────────────────────────────────────
   Api:
@@ -219,6 +235,9 @@ Resources:
       ApiStages:
         - ApiId: !Ref Api
           Stage: !Ref StageName
+      Throttle:
+        RateLimit: !Ref ThrottleRateLimit
+        BurstLimit: !Ref ThrottleBurstLimit
 
   UsagePlanKey:
     Type: AWS::ApiGateway::UsagePlanKey
