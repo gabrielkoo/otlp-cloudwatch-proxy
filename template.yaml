@@ -54,8 +54,8 @@ Parameters:
     Type: CommaDelimitedList
     Default: "OTLPMetrics,claude-code,copilot-cli,gemini-cli,cursor"
     Description: >
-      Allowed CloudWatch metric namespaces. The execution role can only write
-      metrics to these namespaces via the cloudwatch:namespace condition key.
+      Reserved for future use. The cloudwatch:namespace condition key does not
+      apply to CloudWatch OTLP ingestion, so this parameter is not enforced.
 
 Resources:
   # ── IAM Execution Role ──────────────────────────────────────────────
@@ -78,9 +78,6 @@ Resources:
                 Action:
                   - cloudwatch:PutMetricData
                 Resource: "*"
-                Condition:
-                  StringEquals:
-                    cloudwatch:namespace: !Ref MetricNamespaces
         - PolicyName: otlp-traces
           PolicyDocument:
             Version: "2012-10-17"
