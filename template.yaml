@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Lambdaless OTLP Proxy to CloudWatch.
+  Routes OTLP/HTTP telemetry (metrics, traces, logs) through API Gateway REST API
+  to CloudWatch OTLP endpoints using AWS Service Integration with SigV4 signing.
+  No Lambda. No collector. No code.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Configuration
+        Parameters:
+          - StageName
+          - OtlpLogGroupName
+          - MetricNamespaces
+    ParameterLabels:
+      StageName:
+        default: API Gateway Stage Name
+      OtlpLogGroupName:
+        default: Log Group for OTLP Logs
+      MetricNamespaces:
+        default: Allowed CloudWatch Metric Namespaces (comma-separated)
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+    AllowedPattern: "[a-zA-Z0-9]+"
+    Description: API Gateway deployment stage name.
+
+  OtlpLogGroupName:
+    Type: String
+    Default: otlp-logs
+    Description: CloudWatch Logs log group name for OTLP log ingestion.
+
+  MetricNamespaces:
+    Type: CommaDelimitedList
+    Default: "OTLPMetrics,claude-code,copilot-cli,gemini-cli,cursor"
+    Description: >
+      Allowed CloudWatch metric namespaces. The execution role can only write
+      metrics to these namespaces via the cloudwatch:namespace condition key.
+
+Resources:
+  # ── IAM Execution Role ──────────────────────────────────────────────
+  OtlpExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: otlp-metrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref MetricNamespaces
+        - PolicyName: otlp-traces
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
+        - PolicyName: otlp-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogStream
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${OtlpLogGroupName}:*"
+
+  # ── Log Group ───────────────────────────────────────────────────────
+  OtlpLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref OtlpLogGroupName
+      RetentionInDays: 30
+
+  # ── API Gateway REST API ────────────────────────────────────────────
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "otlp-cloudwatch-proxy-${AWS::StackName}"
+      Description: Lambdaless OTLP proxy to CloudWatch via AWS Service Integration
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  V1Resource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: v1
+
+  # ── /v1/metrics ─────────────────────────────────────────────────────
+  MetricsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !Ref V1Resource
+      PathPart: metrics
+
+  MetricsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref MetricsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:monitoring:path/v1/metrics"
+        Credentials: !GetAtt OtlpExecutionRole.Arn
+        PassthroughBehavior: WHEN_NO_MATCH
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: "200"
+            SelectionPattern: ""
+      MethodResponses:
+        - StatusCode: "200"
+
+  # ── /v1/traces ──────────────────────────────────────────────────────
+  TracesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !Ref V1Resource
+      PathPart: traces
+
+  TracesMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref TracesResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:xray:path/v1/traces"
+        Credentials: !GetAtt OtlpExecutionRole.Arn
+        PassthroughBehavior: WHEN_NO_MATCH
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: "200"
+            SelectionPattern: ""
+      MethodResponses:
+        - StatusCode: "200"
+
+  # ── /v1/logs ────────────────────────────────────────────────────────
+  LogsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !Ref V1Resource
+      PathPart: logs
+
+  LogsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref LogsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:logs:path/v1/logs"
+        Credentials: !GetAtt OtlpExecutionRole.Arn
+        PassthroughBehavior: WHEN_NO_MATCH
+        ContentHandling: CONVERT_TO_TEXT
+        RequestParameters:
+          integration.request.header.x-aws-log-group: !Sub "'${OtlpLogGroupName}'"
+          integration.request.header.x-aws-log-stream: "'otlp'"
+        IntegrationResponses:
+          - StatusCode: "200"
+            SelectionPattern: ""
+      MethodResponses:
+        - StatusCode: "200"
+
+  # ── API Key & Usage Plan ────────────────────────────────────────────
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: Stage
+    Properties:
+      Name: !Sub "otlp-proxy-${AWS::StackName}"
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref Api
+          StageName: !Ref StageName
+
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: Stage
+    Properties:
+      UsagePlanName: !Sub "otlp-proxy-${AWS::StackName}"
+      ApiStages:
+        - ApiId: !Ref Api
+          Stage: !Ref StageName
+
+  UsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
+
+  # ── Deployment & Stage ──────────────────────────────────────────────
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - MetricsMethod
+      - TracesMethod
+      - LogsMethod
+    Properties:
+      RestApiId: !Ref Api
+
+  Stage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref Api
+      DeploymentId: !Ref Deployment
+      StageName: !Ref StageName
+
+Outputs:
+  OtlpEndpoint:
+    Description: OTLP endpoint URL — set as OTEL_EXPORTER_OTLP_ENDPOINT
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+
+  ApiKeyId:
+    Description: API Key ID — retrieve the value with the command in GetApiKeyCommand
+    Value: !Ref ApiKey
+
+  MetricsEndpoint:
+    Description: POST /v1/metrics
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/v1/metrics"
+
+  TracesEndpoint:
+    Description: POST /v1/traces
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/v1/traces"
+
+  LogsEndpoint:
+    Description: POST /v1/logs
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/v1/logs"
+
+  GetApiKeyCommand:
+    Description: Run this to retrieve your API key value
+    Value: !Sub "aws apigateway get-api-key --api-key ${ApiKey} --include-value --query value --output text --region ${AWS::Region}"
